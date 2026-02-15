@@ -1,0 +1,55 @@
+# Binaries
+/bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary
+*.test
+
+# Go coverage
+*.out
+coverage.txt
+coverage.html
+
+# Go workspace file
+go.work
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Kubernetes Secrets (CRITICAL - DO NOT COMMIT)
+deployments/kubernetes/secret.yaml
+**/secret.yaml
+**/secrets.yaml
+**/*-secret.yaml
+
+# Environment files
+.env
+.env.local
+.env.*.local
+*.key
+*.pem
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Deprecated/removed files (kept as empty placeholders)
+SECRET_MANAGEMENT_CHANGES.md
+verify_metrics.sh
+
+
+# Personal notes and documentation
+PERSONAL_NOTES.md

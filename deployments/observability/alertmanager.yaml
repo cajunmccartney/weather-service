@@ -1,0 +1,40 @@
+global:
+  resolve_timeout: 5m
+  # PagerDuty integration (example)
+  pagerduty_url: 'https://events.pagerduty.com/v2/enqueue'
+
+# Route configuration
+route:
+  group_by: ['alertname', 'cluster', 'service']
+  group_wait: 10s
+  group_interval: 10s
+  repeat_interval: 12h
+  receiver: 'pagerduty-critical'
+  routes:
+    - match:
+        severity: page
+      receiver: 'pagerduty-critical'
+    - match:
+        severity: warning
+      receiver: 'slack-warnings'
+
+# Receivers
+receivers:
+  - name: 'pagerduty-critical'
+    pagerduty_configs:
+      - service_key: '<pagerduty-service-key>'
+        description: '{{ .GroupLabels.alertname }}: {{ .CommonAnnotations.summary }}'
+
+  - name: 'slack-warnings'
+    slack_configs:
+      - api_url: '<slack-webhook-url>'
+        channel: '#sre-alerts'
+        title: '{{ .GroupLabels.alertname }}'
+        text: '{{ .CommonAnnotations.description }}'
+
+inhibit_rules:
+  - source_match:
+      severity: 'page'
+    target_match:
+      severity: 'warning'
+    equal: ['alertname', 'cluster', 'service']

@@ -1,0 +1,36 @@
+# Build artifacts
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test files
+*.test
+*.out
+coverage.out
+coverage.html
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Git
+.git/
+.gitignore
+
+# Documentation (not needed in image)
+README.md
+CLAUDE.md
+
+# Kubernetes and deployment files (not needed in image)
+deployments/
+Makefile
+
+# Go mod cache (will be downloaded in build)
+vendor/

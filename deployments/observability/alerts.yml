@@ -1,0 +1,120 @@
+groups:
+  - name: weather_service_slo_alerts
+    interval: 30s
+    rules:
+      # Availability SLO: 99.9% of requests should succeed
+      # v3.1 Enhancement: Robust expression with clamp_min to prevent divide-by-zero
+      - alert: HighErrorRate
+        expr: |
+          (
+            rate(http_requests_total{status=~"5.."}[5m])
+            /
+            clamp_min(rate(http_requests_total[5m]), 1)
+          ) > 0.01
+        for: 2m
+        labels:
+          severity: page
+          team: sre
+          slo: availability
+        annotations:
+          summary: "Error rate exceeds 1% threshold (SLO breach)"
+          description: "Current error rate: {{ $value | humanizePercentage }}. Service availability is below 99% SLO."
+          runbook: |
+            1. Check external_api_failures_total for upstream issues
+            2. Review logs for application errors
+            3. Check if load shedding is active (load_shed_total)
+            4. Verify upstream API status
+          dashboard: "https://grafana.example.com/d/weather-service"
+          playbook: "https://wiki.example.com/runbooks/weather-service-high-error-rate"
+
+      # Latency SLO: 95% of requests should complete under 500ms
+      - alert: HighLatency
+        expr: |
+          histogram_quantile(0.95,
+            rate(http_request_duration_seconds_bucket[5m])
+          ) > 0.5
+        for: 5m
+        labels:
+          severity: warning
+          team: sre
+          slo: latency
+        annotations:
+          summary: "P95 latency exceeds 500ms threshold"
+          description: "Current P95 latency: {{ $value }}s. Performance degradation detected."
+          runbook: |
+            1. Check external_api_duration_seconds for upstream slowness
+            2. Review cache hit rate (cache_hits_total vs cache_misses_total)
+            3. Check if rate limiting is active
+            4. Review inflight requests (http_inflight_requests)
+
+      # Dependency Health
+      - alert: UpstreamAPIFailures
+        expr: rate(external_api_failures_total[5m]) > 0.1
+        for: 2m
+        labels:
+          severity: page
+          team: sre
+          component: dependency
+        annotations:
+          summary: "Upstream API failure rate high"
+          description: "OpenWeatherMap API experiencing {{ $value }} failures/sec"
+          runbook: |
+            1. Check external_api_failures_total{error_type} for failure types
+            2. Verify if stale cache is being served (cache_stale_served_total)
+            3. Check upstream API status page
+            4. Consider enabling circuit breaker if not already active
+
+      # Saturation Indicators
+      - alert: LoadSheddingActive
+        expr: rate(load_shed_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+          team: sre
+          component: capacity
+        annotations:
+          summary: "Service shedding load due to saturation"
+          description: "Shedding {{ $value }} requests/sec. Service is at capacity."
+          runbook: |
+            1. Check http_inflight_requests for current load
+            2. Review rate_limit_exceeded_total for client patterns
+            3. Scale horizontally (increase replicas)
+            4. Consider raising LOAD_SHED_THRESHOLD if false positive
+
+      # Cache Health
+      - alert: LowCacheHitRate
+        expr: |
+          (
+            rate(cache_hits_total[10m])
+            /
+            clamp_min(rate(cache_hits_total[10m]) + rate(cache_misses_total[10m]), 1)
+          ) < 0.5
+        for: 10m
+        labels:
+          severity: warning
+          team: sre
+          component: cache
+        annotations:
+          summary: "Cache hit rate below 50%"
+          description: "Current cache hit rate: {{ $value | humanizePercentage }}"
+          runbook: |
+            1. Check if CACHE_TTL_SECONDS is appropriate
+            2. Review traffic patterns (new locations?)
+            3. Verify cache is not being evicted prematurely
+            4. Consider increasing cache size or TTL
+
+      # Service Down
+      - alert: ServiceDown
+        expr: up{job="weather-service"} == 0
+        for: 1m
+        labels:
+          severity: page
+          team: sre
+        annotations:
+          summary: "Weather service is down"
+          description: "Service has been unreachable for 1 minute"
+          runbook: |
+            1. Check pod status in Kubernetes
+            2. Review pod logs
+            3. Check liveness probe failures
+            4. Verify resource constraints (CPU/memory limits)
