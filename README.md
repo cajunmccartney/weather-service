@@ -371,7 +371,7 @@ kubectl apply -f deployments/observability/
 
 **Reasoning:**
 - Better availability signal (serves data vs. fails fast)
-- Simpler implementation (15 min vs. 30+ min for circuit breaker)
+- Simpler implementation
 - Demonstrates graceful degradation thinking
 - Circuit breaker is better for write operations or when stale data is unacceptable
 
