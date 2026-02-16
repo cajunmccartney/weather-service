@@ -72,6 +72,33 @@ func parseCoordinates(input string) (lat, lon float64, ok bool) {
 	return lat, lon, true
 }
 
+// isZipCode attempts to detect if input is in ZIP code format (e.g., "10001,US")
+// Returns true if it looks like a ZIP code pattern
+func isZipCode(input string) bool {
+	parts := strings.Split(input, ",")
+	if len(parts) != 2 {
+		return false
+	}
+	
+	zipPart := strings.TrimSpace(parts[0])
+	countryPart := strings.TrimSpace(parts[1])
+	
+	// ZIP code is typically 5 digits (US) or alphanumeric (other countries)
+	// Country code is typically 2 uppercase letters
+	// If first part is all digits (common for US ZIP codes) and second part is 2 letters, it's likely a ZIP
+	if len(zipPart) >= 4 && len(zipPart) <= 10 && len(countryPart) == 2 {
+		// Check if country code is all letters
+		for _, c := range countryPart {
+			if !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) {
+				return false
+			}
+		}
+		return true
+	}
+	
+	return false
+}
+
 // fetchWeather2_5 fetches weather using the legacy 2.5 API (city name only)
 func (c *Client) fetchWeather2_5(ctx context.Context, location string) (*WeatherData, error) {
 	maxRetries := 3
@@ -225,17 +252,31 @@ type OneCallResponse struct {
 }
 
 // geocodeLocation converts a location name to lat/lon coordinates
+// For ZIP codes (format: "12345,US"), uses the zip endpoint
+// For other locations, uses the direct geocoding endpoint
 func (c *Client) geocodeLocation(ctx context.Context, location string) (*GeocodingResult, error) {
-	// Properly construct URL with query parameters to handle spaces and special characters
-	baseURL := "http://api.openweathermap.org/geo/1.0/direct"
-	params := url.Values{}
-	params.Add("q", location)
-	params.Add("limit", "1")
-	params.Add("appid", c.cfg.WeatherAPIKey)
-	apiURL := baseURL + "?" + params.Encode()
+	var apiURL string
+	
+	// Check if this is a ZIP code query
+	if isZipCode(location) {
+		// Use ZIP code endpoint
+		baseURL := "https://api.openweathermap.org/geo/1.0/zip"
+		params := url.Values{}
+		params.Add("zip", location)
+		params.Add("appid", c.cfg.WeatherAPIKey)
+		apiURL = baseURL + "?" + params.Encode()
+	} else {
+		// Use direct geocoding endpoint
+		baseURL := "https://api.openweathermap.org/geo/1.0/direct"
+		params := url.Values{}
+		params.Add("q", location)
+		params.Add("limit", "1")
+		params.Add("appid", c.cfg.WeatherAPIKey)
+		apiURL = baseURL + "?" + params.Encode()
+	}
 
 	// Log geocoding attempt
-	logger := log.With().Str("location", location).Logger()
+	logger := log.With().Str("location", location).Str("endpoint_type", "geocoding").Logger()
 	if correlationID := ctx.Value(middleware.CorrelationIDKey); correlationID != nil {
 		logger = logger.With().Str("correlation_id", correlationID.(string)).Logger()
 	}
@@ -274,6 +315,17 @@ func (c *Client) geocodeLocation(ctx context.Context, location string) (*Geocodi
 		return nil, &NetworkError{Op: "geocoding_read_body", Err: err}
 	}
 
+	// Handle ZIP code response (single object) vs direct response (array)
+	if isZipCode(location) {
+		// ZIP endpoint returns single object
+		var result GeocodingResult
+		if err := json.Unmarshal(body, &result); err != nil {
+			return nil, fmt.Errorf("failed to parse ZIP geocoding response: %w", err)
+		}
+		return &result, nil
+	}
+
+	// Direct endpoint returns array
 	var results []GeocodingResult
 	if err := json.Unmarshal(body, &results); err != nil {
 		return nil, fmt.Errorf("failed to parse geocoding response: %w", err)

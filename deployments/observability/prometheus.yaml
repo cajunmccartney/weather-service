@@ -14,7 +14,7 @@ alerting:
 
 # Rule files
 rule_files:
-  - 'alerts.yml'
+  - 'alerts.yaml'
 
 # Scrape configurations
 scrape_configs:

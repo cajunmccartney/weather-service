@@ -22,114 +22,46 @@ The project uses a **multi-stage Dockerfile** optimized for size and security:
 docker build -t weather-service:latest .
 
 # Build with specific version tag
-docker build -t weather-service:v1.0.0 .
+docker build -t weather-service:latest .
 
 # Build for specific platform (e.g., for Minikube on ARM Mac)
 docker buildx build --platform linux/amd64 -t weather-service:latest .
 ```
 
-## Deployment Options
+## Running with Docker
 
-### Option 1: Kubernetes/Minikube (Recommended)
+### Basic Usage
 
-This is the **recommended deployment method** as it provides the most production-like environment with proper health checks, resource limits, and observability.
-
-#### Step 1: Build and Load Image
 ```bash
-# Build the Docker image
-docker build -t weather-service:latest .
-
-# Load image into Minikube's Docker daemon
-minikube image load weather-service:latest
-
-# Verify image is loaded
-minikube image ls | grep weather-service
-```
-
-#### Step 2: Create Secret
-```bash
-# Create secret with your OpenWeatherMap API key
-./deployments/kubernetes/create-secret.sh your_openweathermap_api_key
-```
-
-Alternative (manual method):
-```bash
-kubectl create secret generic weather-api-secret \
-  --from-literal=api-key=your_openweathermap_api_key
-```
-
-#### Step 3: Deploy to Kubernetes
-```bash
-# Deploy the application
-kubectl apply -f deployments/kubernetes/deployment.yaml
-
-# Verify deployment
-kubectl get pods -l app=weather-service
-kubectl get svc weather-service
-```
-
-#### Step 4: Access the Service
-```bash
-# Port forward to access locally
-kubectl port-forward svc/weather-service 8080:80
-
-# Test the endpoints
-curl http://localhost:8080/health
-curl http://localhost:8080/weather/London
-curl http://localhost:8080/metrics
-```
-
-#### Step 5: Monitor and Debug
-```bash
-# View logs
-kubectl logs -l app=weather-service --tail=100 -f
-
-# Check pod status
-kubectl describe pod -l app=weather-service
-
-# Check resource usage
-kubectl top pods -l app=weather-service
-
-# Access pod shell (for debugging - note: distroless has no shell)
-kubectl exec -it <pod-name> -- /bin/sh  # Won't work with distroless
-```
-
-#### Clean Up
-```bash
-# Delete deployment
-kubectl delete -f deployments/kubernetes/deployment.yaml
-
-# Delete secret
-kubectl delete secret weather-api-secret
-```
-
-### Option 2: Docker (Standalone)
-
-For quick local testing without Kubernetes orchestration.
-
-#### Run with Docker
-```bash
-# Run with environment variables
-docker run -p 8080:8080 \
-  -e WEATHER_API_KEY=your_api_key_here \
-  -e LOG_LEVEL=debug \
-  weather-service:latest
-
-# Run in background
+# Run with API 2.5 (default, free, no payment method)
 docker run -d -p 8080:8080 \
   --name weather-service \
-  -e WEATHER_API_KEY=your_api_key_here \
+  -e WEATHER_API_KEY=your_key_here \
+  -e WEATHER_API_VERSION=2.5 \
   weather-service:latest
 
-# View logs
-docker logs -f weather-service
+# Run with API 3.0 (requires payment method, supports coordinates)
+docker run -d -p 8080:8080 \
+  --name weather-service \
+  -e WEATHER_API_KEY=your_key_here \
+  -e WEATHER_API_VERSION=3.0 \
+  weather-service:latest
 
-# Stop and remove container
-docker stop weather-service && docker rm weather-service
+# Run with additional configuration
+docker run -d -p 8080:8080 \
+  --name weather-service \
+  -e WEATHER_API_KEY=your_key_here \
+  -e WEATHER_API_VERSION=2.5 \
+  -e LOG_LEVEL=debug \
+  -e CACHE_TTL_SECONDS=600 \
+  -e RATE_LIMIT_RPS=100 \
+  weather-service:latest
 ```
 
-#### Run with Docker Compose
-Create `docker-compose.yml`:
+### Docker Compose
+
+Create `docker-compose.yaml`:
+
 ```yaml
 version: '3.8'
 
@@ -141,6 +73,7 @@ services:
       - "8080:8080"
     environment:
       - WEATHER_API_KEY=${WEATHER_API_KEY}
+      - WEATHER_API_VERSION=2.5
       - LOG_LEVEL=info
       - CACHE_TTL_SECONDS=300
       - RATE_LIMIT_RPS=50
@@ -155,6 +88,7 @@ services:
 ```
 
 Then run:
+
 ```bash
 export WEATHER_API_KEY=your_key_here
 docker-compose up -d
@@ -166,41 +100,116 @@ docker-compose logs -f
 docker-compose down
 ```
 
-### Option 3: Native Go (Development)
+## Operations
 
-For active development and testing without containerization overhead.
+### View Logs
 
-#### Prerequisites
-- Go 1.26+ installed
-- OpenWeatherMap API key
-
-#### Build and Run
 ```bash
-# Build binary
-go build -o bin/weather-service cmd/server/main.go
+# Follow logs in real-time
+docker logs -f weather-service
 
-# Run with environment variables
-export WEATHER_API_KEY=your_key_here
-export LOG_LEVEL=debug
-./bin/weather-service
+# View last 100 lines
+docker logs --tail 100 weather-service
 
-# Or use make
-make build
-export WEATHER_API_KEY=your_key_here
-make run
+# View logs since specific time
+docker logs --since 10m weather-service
+
+# View logs with timestamps
+docker logs -t weather-service
 ```
 
-#### Run Tests
+### Restart and Update
+
 ```bash
-# Run all tests
-go test -v ./...
+# Restart container
+docker restart weather-service
 
-# Run with coverage
-go test -v -race -coverprofile=coverage.out ./...
-go tool cover -html=coverage.out
+# Stop container
+docker stop weather-service
 
-# Or use make
-make test
+# Start stopped container
+docker start weather-service
+
+# Remove container
+docker rm weather-service
+
+# Stop and remove
+docker stop weather-service && docker rm weather-service
+```
+
+### Update Configuration
+
+```bash
+# Stop existing container
+docker stop weather-service && docker rm weather-service
+
+# Run with new configuration
+docker run -d -p 8080:8080 \
+  --name weather-service \
+  -e WEATHER_API_KEY=new_key \
+  -e WEATHER_API_VERSION=3.0 \
+  weather-service:latest
+```
+
+### Monitor Resource Usage
+
+```bash
+# Real-time stats
+docker stats weather-service
+
+# One-time stats
+docker stats --no-stream weather-service
+
+# View container processes
+docker top weather-service
+```
+
+### Health Checks
+
+```bash
+# Check if container is healthy
+docker inspect --format='{{.State.Health.Status}}' weather-service
+
+# View health check logs
+docker inspect --format='{{range .State.Health.Log}}{{.Output}}{{end}}' weather-service
+
+# Manual health check
+curl http://localhost:8080/health
+```
+
+### Testing
+
+```bash
+# Test endpoints
+curl http://localhost:8080/health
+curl http://localhost:8080/weather/London
+curl http://localhost:8080/weather/Tokyo
+curl http://localhost:8080/metrics
+
+# Test with coordinates (API 3.0 only)
+curl http://localhost:8080/weather/51.5074,-0.1278
+
+# Check metrics
+curl http://localhost:8080/metrics | grep external_api_requests_total
+curl http://localhost:8080/metrics | grep cache_hits_total
+curl http://localhost:8080/metrics | grep http_request_duration_seconds
+```
+
+### Debugging
+
+```bash
+# Inspect container
+docker inspect weather-service
+
+# Check container logs for errors
+docker logs weather-service 2>&1 | grep -i error
+
+# Execute command in running container (Note: distroless has no shell)
+# You'll need to use the debug variant for this
+docker exec -it weather-service /bin/sh  # Won't work with distroless
+
+# Check environment variables
+docker exec weather-service env | grep WEATHER
 ```
 
 ## Image Size Optimization
@@ -235,9 +244,9 @@ weather-service:latest        ~15MB  (final)
 ```dockerfile
 USER 1000:1000
 ```
-- Matches K8s `securityContext.runAsUser: 1000`
 - Prevents privilege escalation
 - Aligns with least-privilege principle
+- Matches K8s security context
 
 ### 3. Static Binary
 ```bash
@@ -246,16 +255,6 @@ CGO_ENABLED=0
 - No C library dependencies
 - No libc vulnerabilities
 - Portable across Linux distributions
-
-### 4. Read-Only Filesystem (K8s)
-K8s manifest sets:
-```yaml
-securityContext:
-  readOnlyRootFilesystem: true
-```
-- Prevents runtime modifications
-- No persistent malware installation
-- Immutable infrastructure pattern
 
 ## Troubleshooting
 
@@ -274,32 +273,16 @@ docker run --rm weather-service:latest /app/weather-service --version
 # Should not require glibc
 ```
 
-### Minikube Can't Find Image
-```bash
-# Make sure you're using Minikube's Docker daemon
-eval $(minikube docker-env)
-docker build -t weather-service:latest .
-
-# Or load after building locally
-minikube image load weather-service:latest
-
-# Verify image exists
-minikube image ls | grep weather-service
-```
-
 ### Application Crashes on Startup
 ```bash
-# Check pod logs
-kubectl logs -l app=weather-service --tail=50
+# Check logs
+docker logs weather-service
 
-# Check if secret exists
-kubectl get secret weather-api-secret
+# Verify environment variables
+docker exec weather-service env | grep WEATHER
 
-# Verify secret has correct key name
-kubectl describe secret weather-api-secret
-
-# Check environment variables in pod
-kubectl exec <pod-name> -- env | grep WEATHER
+# Check if API key is set
+docker inspect weather-service | grep WEATHER_API_KEY
 ```
 
 ### Metrics Not Appearing
@@ -312,7 +295,21 @@ curl http://localhost:8080/metrics | grep process_cpu_seconds_total
 ```
 
 ### Permission Denied Errors
-The distroless image runs as UID 1000 by default. Ensure this matches your K8s security context.
+The distroless image runs as UID 1000 by default. Ensure this matches your environment's expectations.
+
+### Port Already in Use
+```bash
+# Find process using port 8080
+lsof -i :8080
+# Or on Linux:
+netstat -tulpn | grep 8080
+
+# Stop the conflicting process or use a different port
+docker run -d -p 8081:8080 \
+  --name weather-service \
+  -e WEATHER_API_KEY=your_key_here \
+  weather-service:latest
+```
 
 ## Advanced Usage
 
@@ -348,6 +345,12 @@ docker images weather-service:latest
 
 # Inspect metadata
 docker inspect weather-service:latest
+
+# Export image
+docker save weather-service:latest > weather-service.tar
+
+# Load image
+docker load < weather-service.tar
 ```
 
 ### Using Debug Container (distroless:debug)
@@ -361,7 +364,7 @@ FROM gcr.io/distroless/static-debian12:debug
 
 Then you can exec into the container:
 ```bash
-kubectl exec -it <pod-name> -- /busybox/sh
+docker exec -it weather-service /busybox/sh
 ```
 
 **Note:** Never use the debug image in production.
@@ -407,50 +410,8 @@ docker tag weather-service:latest registry.example.com/weather-service:latest
 # Push to registry
 docker push registry.example.com/weather-service:latest
 
-# Update K8s deployment to use private registry
-# Add imagePullSecrets to deployment.yaml
-```
-
-### 5. Implement Automated Deployments
-```bash
-# Using ArgoCD
-kubectl apply -f argocd/application.yaml
-
-# Using Flux
-flux create source git weather-service \
-  --url=https://github.com/org/weather-service
-
-flux create kustomization weather-service \
-  --source=weather-service \
-  --path=./deployments/kubernetes
-```
-
-## Monitoring in Kubernetes
-
-### Deploy Prometheus Stack
-```bash
-# Add Prometheus Helm repo
-helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
-helm repo update
-
-# Install Prometheus + Grafana
-helm install prometheus prometheus-community/kube-prometheus-stack
-
-# Port forward to access Prometheus
-kubectl port-forward svc/prometheus-kube-prometheus-prometheus 9090:9090
-
-# Port forward to access Grafana
-kubectl port-forward svc/prometheus-grafana 3000:80
-```
-
-### Deploy AlertManager Configuration
-```bash
-# Create ConfigMap from alerts.yml
-kubectl create configmap weather-service-alerts \
-  --from-file=deployments/observability/alerts.yml
-
-# Configure Prometheus to load the rules
-# (This is typically done through the Prometheus Operator)
+# Pull from registry
+docker pull registry.example.com/weather-service:latest
 ```
 
 ## Performance Testing
@@ -486,6 +447,4 @@ hey -n 1000 -c 50 \
 - [Distroless Images](https://github.com/GoogleContainerTools/distroless)
 - [Go Multi-Stage Builds](https://docs.docker.com/language/golang/build-images/)
 - [Docker Best Practices](https://docs.docker.com/develop/dev-best-practices/)
-- [Kubernetes Best Practices](https://kubernetes.io/docs/concepts/configuration/overview/)
 - [SLSA Framework](https://slsa.dev/)
-- [Prometheus Operator](https://prometheus-operator.dev/)

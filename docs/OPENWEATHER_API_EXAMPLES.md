@@ -14,7 +14,7 @@ The weather service supports both OpenWeather API versions:
 
 **Pricing:** Free (60 calls/minute, 1M calls/month)
 
-**Requirements:** API key only (no credit card)
+**Requirements:** API key only (no payment method)
 
 **Supported inputs:** Location names only
 
@@ -40,12 +40,12 @@ curl "https://api.openweathermap.org/data/2.5/weather?q=London&appid=YOUR_KEY&un
 
 **Pricing:** 1,000 calls/day free, then $0.15 per 100 calls
 
-**Requirements:** API key + credit card on file
+**Requirements:** API key + payment method on file
 
 **Supported inputs:** Location names (geocoded) OR coordinates (direct)
 
 **API call sequence:**
-1. Geocode: `http://api.openweathermap.org/geo/1.0/direct?q=London&limit=1&appid=YOUR_KEY`
+1. Geocode: `https://api.openweathermap.org/geo/1.0/direct?q=London&limit=1&appid=YOUR_KEY`
 2. Weather: `https://api.openweathermap.org/data/3.0/onecall?lat=51.5074&lon=-0.1278&appid=YOUR_KEY&units=imperial&exclude=minutely,hourly,daily,alerts`
 
 ### Switching Between Versions
@@ -57,7 +57,7 @@ Set the `WEATHER_API_VERSION` environment variable:
 export WEATHER_API_VERSION=2.5
 make run
 
-# Use 3.0 (requires credit card, supports coordinates)
+# Use 3.0 (requires payment method, supports coordinates)
 export WEATHER_API_VERSION=3.0
 make run
 ```
@@ -125,7 +125,7 @@ The weather service first converts location names to coordinates using the Geoco
 ### Request
 
 ```bash
-curl "http://api.openweathermap.org/geo/1.0/direct?q=London&limit=1&appid=YOUR_API_KEY"
+curl "https://api.openweathermap.org/geo/1.0/direct?q=London&limit=1&appid=YOUR_API_KEY"
 ```
 
 ### Response
@@ -152,7 +152,7 @@ curl "http://api.openweathermap.org/geo/1.0/direct?q=London&limit=1&appid=YOUR_A
 Location not found:
 
 ```bash
-curl "http://api.openweathermap.org/geo/1.0/direct?q=InvalidCity123&limit=1&appid=YOUR_API_KEY"
+curl "https://api.openweathermap.org/geo/1.0/direct?q=InvalidCity123&limit=1&appid=YOUR_API_KEY"
 # Returns: []
 ```
 
@@ -217,7 +217,7 @@ From `current` object:
 ### Step 1: Geocode "London"
 
 ```bash
-curl "http://api.openweathermap.org/geo/1.0/direct?q=London&limit=1&appid=YOUR_API_KEY"
+curl "https://api.openweathermap.org/geo/1.0/direct?q=London&limit=1&appid=YOUR_API_KEY"
 ```
 
 Result: `lat=51.5074, lon=-0.1278`

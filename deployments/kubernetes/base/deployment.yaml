@@ -1,0 +1,107 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: weather-service
+  labels:
+    app: weather-service
+    version: v1.0.0
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: weather-service
+  template:
+    metadata:
+      labels:
+        app: weather-service
+        version: v1.0.0
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      containers:
+      - name: weather-service
+        image: weather-service:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8080
+          name: http
+          protocol: TCP
+        env:
+        - name: WEATHER_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: weather-api-secret
+              key: api-key
+        - name: WEATHER_API_BASE_URL
+          value: ""  # Auto-detected based on API_VERSION
+        - name: LOG_LEVEL
+          value: "info"
+        - name: CACHE_TTL_SECONDS
+          value: "300"
+        - name: RATE_LIMIT_RPS
+          value: "50"
+        - name: LOAD_SHED_THRESHOLD
+          value: "100"
+        - name: UPSTREAM_TIMEOUT_SECONDS
+          value: "5"
+        - name: REQUEST_TIMEOUT_SECONDS
+          value: "10"
+        - name: PORT
+          value: "8080"
+
+        # v3.1 Enhancement: Resource limits included
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 256Mi
+
+        # Liveness probe (checks if process is alive)
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 2
+          failureThreshold: 3
+
+        # Readiness probe (checks if ready to serve traffic)
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 2
+          failureThreshold: 2
+
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: weather-service
+  labels:
+    app: weather-service
+spec:
+  type: ClusterIP
+  ports:
+  - port: 80
+    targetPort: 8080
+    protocol: TCP
+    name: http
+  selector:
+    app: weather-service

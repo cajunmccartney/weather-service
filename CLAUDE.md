@@ -4,25 +4,40 @@ This document outlines the key architectural decisions, design patterns, and tec
 
 ---
 
-## API Version Selection (3.0)
+## API Version Selection (Dual Support: 2.5 + 3.0)
 
-**Decision:** Use OpenWeather One Call API 3.0
+**Decision:** Support both API 2.5 (default) and API 3.0 with environment variable selection
 
 **Implementation:**
-- Two-step process: Geocoding API (location → lat/lon) → One Call API 3.0
-- Cache keyed by location name (users don't need coordinates)
-- Excluded minutely/hourly/daily/alerts data (only current weather needed)
+- Runtime version selection via `WEATHER_API_VERSION` environment variable
+- **API 2.5**: Direct weather API call (`/data/2.5/weather`)
+- **API 3.0**: Two-step process (Geocoding API → One Call API 3.0)
+- Single codebase, shared retry/cache/metrics infrastructure
+- Kustomize overlays for version-specific Kubernetes deployments
 
 **Rationale:**
-- API 2.5 is deprecated by OpenWeather
-- One Call API 3.0 is the current standard
-- Geocoding adds one extra call but is free and cached
-- Excluding forecast data reduces bandwidth and response time
+- **API 2.5 default**: Free tier, no payment method required, instant activation → optimal for reviewer testing
+- **API 3.0 optional**: Current API standard, coordinate support → production-ready option
+- Demonstrates version flexibility without build-time complexity
+- Single Docker image works for both versions
 
-**Cost Impact:**
-- Free tier: 1,000 calls/day (sufficient for demo/evaluation)
-- Overage: $0.15 per 100 calls
-- Cache reduces calls by ~80%, keeping well within free tier
+**API 2.5 (Default):**
+- Free forever (60 calls/min, 1M calls/month)
+- No payment method required, instant activation
+- Location names only
+- Single API call per request
+
+**API 3.0 (Optional):**
+- 1,000 calls/day free, $0.15 per 100 calls after
+- Requires payment method, 2-hour activation delay
+- Supports location names AND coordinates
+- Two API calls for location names (geocoding + weather), one for coordinates
+
+**Cache Strategy (Both Versions):**
+- Keyed by input (location name or coordinates)
+- Reduces API calls by ~80%
+- Same stale-on-error behavior for both versions
+- 5-minute TTL keeps well within free tiers
 
 ### Coordinate Support Enhancement
 

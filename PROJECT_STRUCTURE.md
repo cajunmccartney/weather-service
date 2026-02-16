@@ -41,7 +41,7 @@ weather-service/
 │   │
 │   └── observability/
 │       ├── alertmanager.yaml      # AlertManager configuration
-│       ├── alerts.yml             # Prometheus alert rules
+│       ├── alerts.yaml            # Prometheus alert rules
 │       └── prometheus.yaml        # Prometheus scrape config
 │
 ├── bin/                            # Compiled binaries (gitignored)
@@ -69,7 +69,7 @@ weather-service/
 - `internal/metrics/metrics.go` - 16 Prometheus metrics
 - `internal/middleware/logging.go` - Structured logging with zerolog
 - `internal/middleware/correlationid.go` - Distributed tracing support
-- `deployments/observability/alerts.yml` - SLO-based alerts
+- `deployments/observability/alerts.yaml` - SLO-based alerts
 
 ### Configuration
 - `internal/config/config.go` - Environment variable loading
@@ -161,14 +161,18 @@ Request flow through middleware stack:
 Environment variables with defaults:
 ```
 1. WEATHER_API_KEY          (required, no default)
-2. WEATHER_API_BASE_URL     (default: https://api.openweathermap.org/data/3.0)
-3. CACHE_TTL_SECONDS        (default: 300)
-4. RATE_LIMIT_RPS           (default: 50)
-5. LOAD_SHED_THRESHOLD      (default: 100)
-6. UPSTREAM_TIMEOUT_SECONDS (default: 5)
-7. REQUEST_TIMEOUT_SECONDS  (default: 10)
-8. LOG_LEVEL                (default: info)
-9. PORT                     (default: 8080)
+2. WEATHER_API_VERSION      (default: 2.5)
+3. WEATHER_API_BASE_URL     (default: auto-detected based on API_VERSION)
+                            - If VERSION=2.5: https://api.openweathermap.org/data/2.5
+                            - If VERSION=3.0: https://api.openweathermap.org/data/3.0
+                            - Can override manually if needed
+4. CACHE_TTL_SECONDS        (default: 300)
+5. RATE_LIMIT_RPS           (default: 50)
+6. LOAD_SHED_THRESHOLD      (default: 100)
+7. UPSTREAM_TIMEOUT_SECONDS (default: 5)
+8. REQUEST_TIMEOUT_SECONDS  (default: 10)
+9. LOG_LEVEL                (default: info)
+10. PORT                    (default: 8080)
 ```
 
 ## Testing Strategy
@@ -252,30 +256,6 @@ Slack #sre-alerts
 - No capabilities
 - Distroless image (no shell)
 
-## Production Deployment Flow
-
-```
-1. Developer commits code
-   ↓
-2. CI builds Docker image
-   ↓
-3. CI scans image for CVEs
-   ↓
-4. CI pushes to registry (tagged with git SHA)
-   ↓
-5. ArgoCD/Flux detects new image
-   ↓
-6. K8s performs rolling update
-   ↓
-7. Readiness probe validates new pods
-   ↓
-8. Old pods gracefully drain (30s timeout)
-   ↓
-9. Prometheus scrapes new pods
-   ↓
-10. Alerts validate SLO compliance
-```
-
 ## Key Metrics Dashboard Layout
 
 Suggested Grafana dashboard panels:
@@ -306,38 +286,54 @@ Suggested Grafana dashboard panels:
 
 ## Common Operations
 
-### Scale Up
+### Scale Deployment
 ```bash
 kubectl scale deployment weather-service --replicas=5
+kubectl get pods -l app=weather-service -w
 ```
 
 ### View Logs
 ```bash
+# All pods
 kubectl logs -l app=weather-service --tail=100 -f
+
+# Specific pod
+kubectl logs weather-service-xxx-xxx
 ```
 
 ### Check Metrics
 ```bash
+# Port forward to service
 kubectl port-forward svc/weather-service 8080:80
+
+# In another terminal, check metrics
 curl http://localhost:8080/metrics
 ```
 
 ### Update Secret
 ```bash
-# Delete old secret
 kubectl delete secret weather-api-secret
-
-# Create new secret
-./deployments/kubernetes/create-secret.sh new_api_key_here
-
-# Restart pods to pick up new secret
+./deployments/kubernetes/create-secret.sh new_api_key
 kubectl rollout restart deployment/weather-service
 ```
 
-### Drain Traffic Before Maintenance
+### Check Resource Usage
 ```bash
-kubectl cordon <node>
-kubectl drain <node> --ignore-daemonsets
-# Perform maintenance
-kubectl uncordon <node>
+# Pod CPU and memory
+kubectl top pods -l app=weather-service
+
+# Deployment resource configuration
+kubectl describe deployment weather-service | grep -A 5 "Limits\|Requests"
+```
+
+### Switch API Versions
+```bash
+# Switch to API 2.5
+kubectl apply -k deployments/kubernetes/overlays/api-2.5
+
+# Switch to API 3.0
+kubectl apply -k deployments/kubernetes/overlays/api-3.0
+
+# Verify version
+kubectl get deployment weather-service -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="WEATHER_API_VERSION")].value}'
 ```

@@ -78,154 +78,249 @@ Exposes Prometheus-compatible metrics.
 
 ## Configuration
 
-All configuration via environment variables:
+All configuration via environment variables. See [HARDENING_SUMMARY.md](HARDENING_SUMMARY.md#configuration-reference) for detailed configuration reference.
 
-```bash
-# Required
-export WEATHER_API_KEY=your_openweathermap_api_key
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `WEATHER_API_KEY` | *(required)* | OpenWeatherMap API key |
+| `WEATHER_API_VERSION` | `2.5` | API version: `2.5` or `3.0` |
+| `PORT` | `8080` | HTTP server port |
+| `LOG_LEVEL` | `info` | Log verbosity: `debug`, `info`, `warn`, `error` |
+| `CACHE_TTL_SECONDS` | `300` | Cache freshness (5 min) |
+| `REQUEST_TIMEOUT_SECONDS` | `10` | Total request timeout |
+| `UPSTREAM_TIMEOUT_SECONDS` | `5` | Upstream API timeout (must be < REQUEST_TIMEOUT) |
+| `RATE_LIMIT_RPS` | `50` | Requests per second per IP |
+| `LOAD_SHED_THRESHOLD` | `100` | Max concurrent requests before shedding |
 
-# API Version Selection
-export WEATHER_API_VERSION=2.5  # Default: 2.5 (free, no credit card)
-                                # Options: "2.5" or "3.0"
+## API Version Overview
 
-# Optional (with defaults)
-export WEATHER_API_BASE_URL=  # Auto-detected based on API_VERSION
-                              # 2.5: https://api.openweathermap.org/data/2.5
-                              # 3.0: https://api.openweathermap.org/data/3.0
-export CACHE_TTL_SECONDS=300
-export REQUEST_TIMEOUT_SECONDS=10
-export UPSTREAM_TIMEOUT_SECONDS=5
-export RATE_LIMIT_RPS=50
-export LOAD_SHED_THRESHOLD=100
-export LOG_LEVEL=info
-export PORT=8080
-```
+This service supports two OpenWeather API versions. **Choose 2.5 for quick testing** (no payment method required), or 3.0 for the current API with coordinate support.
 
-## API Version Selection
+| Feature | API 2.5 (Default) | API 3.0 |
+|---------|-------------------|---------|
+| **Status** | Deprecated but functional | Current version |
+| **Payment Method** | Not required | Required on file |
+| **Activation** | Instant | 2-hour delay for new accounts |
+| **Free Tier** | 60 calls/min, 1M calls/month | 1,000 calls/day |
+| **Overage Cost** | N/A (free forever) | $0.15 per 100 calls |
+| **Query Support** | Location names only | Location names + coordinates |
+| **Geocoding** | Not used | Free (automatic) |
 
-### Version 2.5 (Default):
-* ✅ Free forever (60 calls/minute, 1M calls/month)
-* ✅ No credit card required
-* ✅ Instant activation
-* ✅ Supports location names only
-* ⚠️ Deprecated by OpenWeather (but still functional)
-
-### Version 3.0 (Optional):
-* ✅ Current API version
-* ✅ Supports both location names AND coordinates
-* ✅ 1,000 free calls/day
-* ⚠️ Requires credit card on file
-* ⚠️ 2-hour activation delay for new accounts
-* 💰 $0.15 per 100 calls after 1,000/day
-
-**Recommendation for Testing:** Use version 2.5 (default) for quick testing. Use version 3.0 if you need coordinate support or prefer the current API.
-
-**To switch versions:**
-```bash
-# Use 2.5 (default)
-export WEATHER_API_VERSION=2.5
-make run
-
-# Use 3.0
-export WEATHER_API_VERSION=3.0
-make run
-```
-
-## API Usage & Costs
-
-**Cost Optimization:**
-- 5-minute cache reduces API calls by ~80% (typical hit rate)
-- Stale-on-error serves cached data during outages (free)
+**Cost Optimization (both versions):**
+- 5-minute cache reduces API calls by ~80%
+- Stale-on-error serves cached data during outages
 - Rate limiting prevents abuse
 
-**Geocoding API (3.0 only):**
-- Free (included with API key)
-- Used automatically to convert location names to coordinates
+## Deployment
 
-## Deployment Options
+**Recommended:** Kubernetes deployment below. For Docker-only or local development, see [Alternative Deployment Methods](#alternative-deployment-methods).
 
-### Option 1: Kubernetes/Minikube (Recommended)
+### Kubernetes/Minikube Deployment
 
-Production-ready deployment with health checks, resource limits, and observability.
+Production-ready deployment with health checks, resource limits, and observability. Supports both API versions via Kustomize overlays.
 
 ```bash
-# Build and load image into Minikube
+# 1. Build and load image into Minikube
+eval $(minikube docker-env)
 docker build -t weather-service:latest .
-minikube image load weather-service:latest
 
-# Create secret with API key
+# 2. Create secret with your OpenWeatherMap API key
 ./deployments/kubernetes/create-secret.sh your_openweathermap_api_key
 
-# Deploy the application
-kubectl apply -f deployments/kubernetes/deployment.yaml
+# 3. Deploy with your chosen API version
+#    API 2.5 (default, free, no payment method):
+kubectl apply -k deployments/kubernetes/overlays/api-2.5
 
-# Verify deployment
+#    API 3.0 (requires payment method, supports coordinates):
+kubectl apply -k deployments/kubernetes/overlays/api-3.0
+
+# 4. Verify deployment
 kubectl get pods -l app=weather-service
+kubectl rollout status deployment/weather-service
 
-# Access the service
+# 5. Access the service (in a separate terminal)
 kubectl port-forward svc/weather-service 8080:80
 
-# Test endpoints
+# 6. Test endpoints (in another terminal)
 curl http://localhost:8080/health
 curl http://localhost:8080/weather/London
 curl http://localhost:8080/metrics
 ```
 
-**Note:** If you need to update the secret later:
+**Features:**
+- Resource limits (CPU: 100m-500m, Memory: 128Mi-256Mi)
+- Liveness and readiness probes
+- Security context (non-root, read-only filesystem)
+- Prometheus annotations for auto-discovery
+- Clean version switching with Kustomize overlays
 
+#### Operations
+
+**Switch API versions:**
+```bash
+# Switch to 3.0
+kubectl apply -k deployments/kubernetes/overlays/api-3.0
+
+# Switch to 2.5
+kubectl apply -k deployments/kubernetes/overlays/api-2.5
+
+# Verify
+kubectl rollout status deployment/weather-service
+```
+
+**View logs:**
+```bash
+kubectl logs -l app=weather-service --tail=100 -f
+```
+
+**Update API key:**
 ```bash
 kubectl delete secret weather-api-secret
 ./deployments/kubernetes/create-secret.sh new_api_key
 kubectl rollout restart deployment/weather-service
 ```
 
-See [DOCKER.md](DOCKER.md) for detailed Kubernetes deployment, monitoring, and troubleshooting.
+**Monitor resource usage:**
+```bash
+kubectl top pods -l app=weather-service
+```
 
-### Option 2: Docker (Standalone)
+**Check deployment status:**
+```bash
+kubectl describe deployment weather-service
+kubectl get events --sort-by=.metadata.creationTimestamp
+```
 
-Quick local testing without Kubernetes.
+See [deployments/kubernetes/README.md](deployments/kubernetes/README.md) for Kustomize details.
+
+---
+
+### Alternative Deployment Methods
+
+<details>
+<summary><b>Docker (Standalone)</b> - Click to expand</summary>
+
+Quick local testing without Kubernetes orchestration.
+
+#### Run with Docker
 
 ```bash
-# Build Docker image
+# Build image
 docker build -t weather-service:latest .
 
-# Run container
-docker run -p 8080:8080 \
+# Run with API 2.5 (free, no payment method)
+docker run -d -p 8080:8080 \
+  --name weather-service \
   -e WEATHER_API_KEY=your_key_here \
+  -e WEATHER_API_VERSION=2.5 \
+  weather-service:latest
+
+# Run with API 3.0 (requires payment method, supports coordinates)
+docker run -d -p 8080:8080 \
+  --name weather-service \
+  -e WEATHER_API_KEY=your_key_here \
+  -e WEATHER_API_VERSION=3.0 \
   weather-service:latest
 
 # Test endpoints
-curl http://localhost:8080/weather/London
 curl http://localhost:8080/health
+curl http://localhost:8080/weather/London
 curl http://localhost:8080/metrics
 ```
 
-### Option 3: Native Go (Development)
+#### Operations
+
+**View logs:**
+```bash
+docker logs -f weather-service
+```
+
+**Restart container:**
+```bash
+docker restart weather-service
+```
+
+**Stop and remove:**
+```bash
+docker stop weather-service
+docker rm weather-service
+```
+
+**Update configuration:**
+```bash
+# Stop existing container
+docker stop weather-service && docker rm weather-service
+
+# Run with new config
+docker run -d -p 8080:8080 \
+  --name weather-service \
+  -e WEATHER_API_KEY=new_key \
+  -e WEATHER_API_VERSION=3.0 \
+  weather-service:latest
+```
+
+**Check resource usage:**
+```bash
+docker stats weather-service
+```
+
+</details>
+
+<details>
+<summary><b>Native Go (Development)</b> - Click to expand</summary>
 
 For active development without containerization.
 
-```bash
-# Build
-make build
+#### Run Locally
 
-# Run tests
+```bash
+# Build and test
+make build
 make test
 
-# Run service
+# Run with API 2.5 (free, no payment method)
 export WEATHER_API_KEY=your_key_here
+export WEATHER_API_VERSION=2.5
+make run
+
+# Run with API 3.0 (requires payment method, supports coordinates)
+export WEATHER_API_KEY=your_key_here
+export WEATHER_API_VERSION=3.0
 make run
 
 # Test endpoints
-curl http://localhost:8080/weather/London
 curl http://localhost:8080/health
+curl http://localhost:8080/weather/London
 curl http://localhost:8080/metrics
 ```
 
-**Includes:**
-- Resource limits (CPU: 100m-500m, Memory: 128Mi-256Mi)
-- Liveness and readiness probes
-- Security context (non-root, read-only filesystem)
-- Prometheus annotations for auto-discovery
+#### Operations
+
+**Run with debug logging:**
+```bash
+export LOG_LEVEL=debug
+make run
+```
+
+**Run tests with coverage:**
+```bash
+make test
+# Or with detailed coverage report:
+go test -v -race -coverprofile=coverage.out ./...
+go tool cover -html=coverage.out
+```
+
+**Build for production:**
+```bash
+CGO_ENABLED=0 go build -ldflags="-w -s" -o bin/weather-service cmd/server/main.go
+```
+
+**Clean build artifacts:**
+```bash
+make clean
+```
+
+</details>
 
 ### Observability Stack
 ```bash

@@ -1,0 +1,12 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: weather-service
+spec:
+  template:
+    spec:
+      containers:
+        - name: weather-service
+          env:
+            - name: WEATHER_API_VERSION
+              value: "2.5"

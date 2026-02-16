@@ -1,95 +1,137 @@
-# Production Hardening Summary
+# Production Hardening Reference
 
-## Overview
-This document summarizes the production hardening improvements applied to the weather-service. All changes were focused on correctness, safety, and operational reliability without adding complexity or new dependencies.
+This document explains the production hardening measures implemented in the weather-service and serves as a reference for understanding the reliability and operational patterns used throughout the codebase.
 
-## Changes Implemented
+---
 
-### Phase 1: Error Classification (P0 - ESSENTIAL) ✅
+## Error Handling & Retry Logic
 
-**Problem:** Fragile error handling using string matching (`err.Error() == "upstream returned 400"`) that could break if error format changes.
+### Structured Error Types
 
-**Solution:** Created structured error types with type-safe retry logic.
+**Location:** `internal/weather/errors.go`
 
-**Files Modified:**
-- ✅ `internal/weather/errors.go` (NEW) - Structured error types
-- ✅ `internal/weather/client.go` - Use structured errors
-- ✅ `internal/weather/errors_test.go` (NEW) - Error type tests
+The service uses structured error types instead of string matching for reliable error classification:
 
-**Key Changes:**
 ```go
-// Before: Fragile string matching
-if isClientError(err) { ... }
+type APIError struct {
+    StatusCode int
+    Message    string
+    Source     string  // "geocoding" or "weather"
+}
 
-// After: Type-safe error checking
-if apiErr, ok := lastErr.(*APIError); ok && !apiErr.IsRetryable() { ... }
+func (e *APIError) IsRetryable() bool {
+    return e.StatusCode == 429 || e.StatusCode >= 500
+}
 ```
 
 **Benefits:**
-- Retry logic based on actual HTTP status codes (429, 5xx)
+- Type-safe error checking eliminates fragile string matching
+- Explicit retry policy based on HTTP status codes
 - Network errors properly wrapped and always retryable
-- Type-safe - eliminates runtime errors from format changes
-- Explicit retry policy: 5xx and 429 are retryable, other 4xx are not
+- Status codes and sources tracked for observability
 
-### Phase 2: Configuration Validation (P0 - ESSENTIAL) ✅
+**Retry Policy:**
+- ✅ **Retryable:** 429 (rate limit), 5xx (server errors), network errors
+- ❌ **Non-retryable:** 400, 401, 404 (client errors)
 
-**Problem:** Service can start with invalid configuration (negative timeouts, invalid port) and fail at runtime.
-
-**Solution:** Added startup validation that fails fast with clear error messages.
-
-**Files Modified:**
-- ✅ `internal/config/config.go` - Added `Validate()` method, changed `Load()` signature
-- ✅ `cmd/server/main.go` - Handle configuration errors gracefully
-- ✅ `internal/config/config_test.go` (NEW) - Validation tests
-
-**Key Changes:**
+**Example Usage:**
 ```go
-// Before: Fatal at runtime
-cfg := config.Load()
+if apiErr, ok := lastErr.(*APIError); ok && !apiErr.IsRetryable() {
+    // Don't retry - client error
+    return nil, apiErr
+}
+// Otherwise, retry with backoff
+```
 
-// After: Validate at startup
+### Exponential Backoff with Jitter
+
+**Location:** `internal/weather/client.go` (retry loop)
+
+Prevents thundering herd problem when multiple instances retry simultaneously:
+
+```go
+// Exponential backoff: 100ms, 200ms, 400ms
+baseBackoff := time.Duration(math.Pow(2, float64(attempt-1))*100) * time.Millisecond
+
+// Proportional jitter: ±25% of backoff
+jitterRange := baseBackoff / 4
+jitter := time.Duration(rand.Int63n(int64(jitterRange*2))) - jitterRange
+time.Sleep(baseBackoff + jitter)
+```
+
+**Key Features:**
+- RNG seeded at package init to ensure randomness across instances
+- Jitter proportional to backoff (not fixed)
+- Backoff/jitter values logged for debugging
+
+**Max Retries:** 3 attempts (configurable)
+
+---
+
+## Configuration Validation
+
+**Location:** `internal/config/config.go`
+
+### Fail-Fast Validation
+
+The service validates all configuration at startup and refuses to start with invalid config:
+
+```go
+func (c *Config) Validate() error {
+    // API key required
+    if c.WeatherAPIKey == "" {
+        return errors.New("WEATHER_API_KEY must be set")
+    }
+
+    // Timeout relationship
+    if c.UpstreamTimeoutSeconds >= c.RequestTimeoutSeconds {
+        return fmt.Errorf("UPSTREAM_TIMEOUT_SECONDS (%d) must be less than REQUEST_TIMEOUT_SECONDS (%d)", ...)
+    }
+
+    // Port range
+    if c.Port < 1 || c.Port > 65535 {
+        return fmt.Errorf("PORT must be between 1 and 65535, got %d", c.Port)
+    }
+
+    // ... additional validations
+}
+```
+
+### Validation Rules
+
+| Configuration | Rule | Why |
+|---------------|------|-----|
+| `WEATHER_API_KEY` | Must be set | Required for API access |
+| Timeouts | `UPSTREAM_TIMEOUT < REQUEST_TIMEOUT` | Prevents timeout race conditions |
+| `PORT` | 1-65535 | Valid TCP port range |
+| `LOG_LEVEL` | Valid zerolog level | Prevents runtime logging errors |
+| Numeric configs | Must be positive (≥1) | Prevents invalid values |
+
+**Usage:**
+```go
 cfg, err := config.Load()
 if err != nil {
     log.Fatal().Err(err).Msg("invalid configuration")
 }
 ```
 
-**Validation Rules:**
-- ✅ `WEATHER_API_KEY` must be set
-- ✅ Timeout relationships: `UPSTREAM_TIMEOUT_SECONDS < REQUEST_TIMEOUT_SECONDS`
-- ✅ Port range: 1-65535
-- ✅ Log level: must be valid zerolog level
-- ✅ All numeric configs must be positive (>= 1)
+---
 
-**Benefits:**
-- Fails fast at startup instead of runtime
-- Clear, structured error messages
-- Prevents invalid timeout configurations
-- Validates port range and log levels
+## HTTP Client Configuration
 
-### Phase 3: HTTP Client Transport Configuration (P1 - RECOMMENDED) ✅
+**Location:** `internal/weather/client.go` (NewClient)
 
-**Problem:** HTTP client uses default transport which may not be optimal for connection pooling.
+### Custom Transport
 
-**Solution:** Added basic transport configuration for better resource management.
+The HTTP client uses a custom transport for optimal connection pooling:
 
-**Files Modified:**
-- ✅ `internal/weather/client.go` - Added HTTP transport configuration
-
-**Key Changes:**
 ```go
-// Before: Default transport
-httpClient: &http.Client{
-    Timeout: time.Duration(cfg.UpstreamTimeoutSeconds) * time.Second,
-}
-
-// After: Configured transport
 httpClient: &http.Client{
     Timeout: time.Duration(cfg.UpstreamTimeoutSeconds) * time.Second,
     Transport: &http.Transport{
-        MaxIdleConns:        100,
-        MaxIdleConnsPerHost: 10,
-        MaxConnsPerHost:     10,
+        MaxIdleConns:        100,  // Total idle connections
+        MaxIdleConnsPerHost: 10,   // Per-host idle connections
+        MaxConnsPerHost:     10,   // Max active connections per host
         IdleConnTimeout:     90 * time.Second,
         TLSHandshakeTimeout: 10 * time.Second,
         DisableKeepAlives:   false,
@@ -98,172 +140,444 @@ httpClient: &http.Client{
 ```
 
 **Benefits:**
-- Better connection reuse across requests
-- Prevents connection exhaustion
+- Connection reuse across requests (reduces latency)
+- Prevents connection exhaustion under load
 - Proper TLS handshake timeouts
-- No functional change, just better resource management
+- Keep-alive enabled for better performance
 
-### Phase 4: Retry Jitter Fix (P1 - RECOMMENDED) ✅
+**Connection Pool Tuning:**
+- Default limits are conservative (10 per host)
+- Can be increased for high-throughput scenarios
+- Monitor with Go runtime metrics: `go_goroutines`, `http_client_connections_*`
 
-**Problem:** Retry jitter uses unseeded random number generator, causing all instances to retry synchronously (thundering herd).
+---
 
-**Solution:** Seed RNG properly and use proportional jitter calculation.
+## Observability & Debugging
 
-**Files Modified:**
-- ✅ `internal/weather/client.go` - Added `init()` for RNG seeding, improved jitter
+### Correlation IDs
 
-**Key Changes:**
+**Location:** `internal/middleware/correlation_id.go`
+
+Every request gets a unique correlation ID for tracing:
+
 ```go
-// Added package init
-func init() {
-    rand.Seed(time.Now().UnixNano())
-}
-
-// Before: Fixed jitter
-backoff := time.Duration(math.Pow(2, float64(attempt-1))*100) * time.Millisecond
-jitter := time.Duration(rand.Intn(50)) * time.Millisecond
-
-// After: Proportional jitter (±25% of backoff)
-baseBackoff := time.Duration(math.Pow(2, float64(attempt-1))*100) * time.Millisecond
-jitterRange := baseBackoff / 4
-jitter := time.Duration(rand.Int63n(int64(jitterRange*2))) - jitterRange
+correlationID := uuid.New().String()
+ctx := context.WithValue(r.Context(), CorrelationIDKey, correlationID)
+w.Header().Set("X-Correlation-ID", correlationID)
 ```
 
-**Benefits:**
-- Proper RNG seeding prevents all instances retrying synchronously
-- Jitter proportional to backoff (not fixed 50ms)
-- Prevents thundering herd problem
-- Better observability with backoff/jitter logged
-
-### Phase 5: Logging Improvement (OPTIONAL) ✅
-
-**Problem:** Correlation IDs might not appear in all error contexts, particularly in weather client logs.
-
-**Solution:** Ensure correlation ID appears in logs for upstream request failures/retries.
-
-**Files Modified:**
-- ✅ `internal/weather/client.go` - Added correlation ID to error logs
-
-**Key Changes:**
+**Usage in Logs:**
 ```go
-// Retry logging with correlation ID
-logger := log.With().Int("attempt", attempt).Dur("backoff", baseBackoff).Dur("jitter", jitter).Logger()
+// Extract from context
 if correlationID := ctx.Value(middleware.CorrelationIDKey); correlationID != nil {
     logger = logger.With().Str("correlation_id", correlationID.(string)).Logger()
 }
-logger.Debug().Msg("retrying request")
-
-// Request creation error logging with correlation ID
-logger := log.With().Err(err).Logger()
-if correlationID := ctx.Value(middleware.CorrelationIDKey); correlationID != nil {
-    logger = logger.With().Str("correlation_id", correlationID.(string)).Logger()
-}
-logger.Error().Msg("failed to create HTTP request")
+logger.Error().Msg("request failed")
 ```
 
 **Benefits:**
-- Correlation IDs now present in retry and error logs
-- Better request tracing during failures
-- Improved operational debugging
+- Trace requests across retries, cache lookups, and upstream calls
+- Returned in response header for client-side debugging
+- Logged at every decision point (cache hit/miss, retry, error)
 
-## Test Results
+### Structured Logging
 
-All tests pass:
-```
-✓ weather-service/internal/cache      (cached)
-✓ weather-service/internal/config     (cached)
-✓ weather-service/internal/middleware (cached)
-✓ weather-service/internal/weather    2.326s
-```
+**Pattern:** All logs use structured zerolog fields:
 
-Build succeeds:
-```
-✓ Build successful
+```go
+log.Info().
+    Str("location", location).
+    Str("api_version", version).
+    Int("status_code", statusCode).
+    Msg("weather data fetched")
 ```
 
-Service starts normally:
+**Key Log Events:**
+- `cache hit/miss` - Cache decisions
+- `retrying request` - Retry attempts with backoff/jitter
+- `stale cache used` - Stale-on-error activations
+- `load shedding activated` - Saturation events
+- `upstream API error` - External API failures
+
+---
+
+## Resilience Patterns
+
+### Stale-on-Error
+
+**Location:** `internal/cache/cache.go`
+
+Serves stale cached data when upstream fails, with age guard:
+
+```go
+// If fresh data fetch fails, serve stale if not too old
+staleAge := time.Since(item.StoredAt)
+if staleAge < c.ttl * 2 {  // Max 2x TTL (10 minutes for 5-min TTL)
+    return item.Value, nil
+}
+return nil, ErrCacheTooStale
 ```
-✓ Service running
+
+**Behavior:**
+- Serves stale data up to 2× TTL (10 minutes for default 5-min TTL)
+- Prevents serving arbitrarily old data
+- Logged with `stale_cache_used` metric and log event
+
+**When It Activates:**
+- Upstream API returns 5xx errors after retries
+- Network failures after retries
+- Rate limit exceeded (429) after retries
+
+### Load Shedding
+
+**Location:** `internal/middleware/load_shed.go`
+
+Rejects requests when inflight count exceeds threshold:
+
+```go
+if atomic.LoadInt64(&inflight) >= threshold {
+    metrics.LoadShedTotal.Inc()
+    http.Error(w, "Service overloaded", http.StatusServiceUnavailable)
+    return
+}
 ```
 
-## Files Created
+**Configuration:**
+- Default threshold: 100 concurrent requests
+- Returns 503 Service Unavailable
+- Metric: `load_shed_total` (counter)
+- Logged with correlation ID
 
-1. `internal/weather/errors.go` - Structured error types
-2. `internal/weather/errors_test.go` - Error type tests
-3. `internal/config/config_test.go` - Config validation tests
+**Tuning:**
+- Set `LOAD_SHED_THRESHOLD` based on measured capacity
+- Monitor `http_inflight_requests` gauge to establish baseline
+- Consider HPA (Horizontal Pod Autoscaler) if shedding occurs frequently
 
-## Files Modified
+### Rate Limiting
 
-1. `internal/weather/client.go` - Errors, transport, jitter, logging
-2. `internal/config/config.go` - Validation method, Load signature
-3. `cmd/server/main.go` - Config error handling
+**Location:** `internal/middleware/rate_limit.go`
 
-## Verification Checklist
+Per-IP token bucket rate limiting:
 
-- [x] All tests pass: `go test ./...`
-- [x] Build succeeds: `go build -o bin/weather-service cmd/server/main.go`
-- [x] Service starts: `./bin/weather-service`
-- [x] Health check works: Would test with `curl http://localhost:8080/health`
-- [x] Weather endpoint works: Would test with `curl http://localhost:8080/weather/London`
-- [x] Invalid config fails fast: Config validation prevents startup with invalid values
+```go
+limiter := rate.NewLimiter(rate.Limit(rps), rps)
+if !limiter.Allow() {
+    http.Error(w, "Rate limit exceeded", http.StatusTooManyRequests)
+    return
+}
+```
 
-## What Was NOT Changed
+**Configuration:**
+- Default: 50 requests/second per IP
+- Set via `RATE_LIMIT_RPS` environment variable
+- Returns 429 Too Many Requests
+- Metric: `rate_limit_total` (counter)
 
-Following the constraints, we did NOT:
-- ❌ Add new external dependencies (Redis, OpenTelemetry, etc.)
-- ❌ Refactor large portions of code
-- ❌ Add circuit breakers or new reliability patterns
-- ❌ Change core architecture or project structure
-- ❌ Add extensive test suites (kept minimal)
-- ❌ Modify Docker build process
-- ❌ Add new features or endpoints
-- ❌ Touch unrelated code
+**Production Considerations:**
+- Consider distributed rate limiting (Redis) for multi-instance deployments
+- Current implementation is per-instance, not cluster-wide
+- May need adjustment based on upstream API limits (OpenWeather: 60 rps)
 
-## Impact Assessment
+---
 
-**Correctness:** ✅ Improved
-- Type-safe error handling eliminates string matching bugs
-- Config validation prevents invalid runtime states
+## Security
 
-**Safety:** ✅ Improved
-- Fail-fast configuration validation
-- Proper timeout relationship validation
-- Better connection pooling prevents resource exhaustion
+### Distroless Container
 
-**Operational Reliability:** ✅ Improved
-- Proper retry jitter prevents thundering herd
-- Correlation ID logging improves debugging
-- Structured errors provide better observability
+**Location:** `Dockerfile`
 
-**Complexity:** ✅ Minimal Increase
-- Added 3 new files (all tests or small utility files)
-- Modified 3 existing files with localized changes
-- No new dependencies
-- No architectural changes
+Uses minimal distroless base image:
 
-**Backward Compatibility:** ✅ Maintained
-- Config environment variables unchanged
-- API endpoints unchanged
-- Metrics unchanged
-- Deployment unchanged
+```dockerfile
+FROM gcr.io/distroless/static-debian12
+USER 1000:1000
+COPY --from=builder /app/weather-service /app/weather-service
+```
 
-## Recommended Next Steps (Not Implemented)
+**Security Features:**
+- No shell or package manager (attack surface minimization)
+- Runs as non-root user (UID 1000)
+- Static binary (no libc dependencies/vulnerabilities)
+- Read-only root filesystem (K8s security context)
 
-For future production hardening (beyond scope of this phase):
+### Kubernetes Security Context
 
-1. **Readiness Probe** - Separate from liveness, check upstream connectivity
-2. **Request Context Deadlines** - Propagate parent context deadlines
-3. **Structured Error Responses** - Return error codes in API responses
-4. **Config Hot Reload** - Watch config changes without restart
-5. **Advanced Retry** - Adaptive backoff based on upstream response patterns
+**Location:** `deployments/kubernetes/base/deployment.yaml`
 
-## Conclusion
+```yaml
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+```
 
-All 5 phases completed successfully. The weather-service now has:
-- ✅ Type-safe error handling with structured errors
-- ✅ Fail-fast configuration validation
-- ✅ Optimized HTTP client transport
-- ✅ Proper retry jitter to prevent thundering herd
-- ✅ Enhanced logging with correlation IDs
+**Benefits:**
+- Prevents privilege escalation
+- Immutable runtime (no file modifications)
+- Minimal Linux capabilities
+- Defense-in-depth against container breakout
 
-The changes are minimal, focused, and production-ready. The service maintains backward compatibility while significantly improving correctness and operational reliability.
+---
+
+## Monitoring & Alerting
+
+### Key Metrics
+
+**Request Metrics:**
+- `http_requests_total{status,method}` - Request count by status/method
+- `http_request_duration_seconds{handler}` - Request latency histogram
+- `http_inflight_requests` - Current concurrent requests
+
+**Dependency Metrics:**
+- `external_api_requests_total{api,version}` - Upstream API calls
+- `external_api_failures_total{api,version}` - Upstream failures
+- `cache_hits_total` - Cache effectiveness
+- `cache_misses_total` - Cache misses
+
+**Reliability Metrics:**
+- `rate_limit_total` - Rate limit activations
+- `load_shed_total` - Load shedding activations
+- `stale_cache_used_total` - Stale-on-error activations
+
+### Alert Rules
+
+**Location:** `deployments/observability/alerts.yaml`
+
+**HighErrorRate:**
+```promql
+rate(http_requests_total{status=~"5.."}[5m]) /
+  clamp_min(rate(http_requests_total[5m]), 1) > 0.01
+```
+Triggers when error rate exceeds 1% (violates 99% SLO)
+
+**HighLatency:**
+```promql
+histogram_quantile(0.95,
+  rate(http_request_duration_seconds_bucket[5m])) > 0.5
+```
+Triggers when P95 latency exceeds 500ms
+
+**LoadSheddingActive:**
+```promql
+rate(load_shed_total[5m]) > 0
+```
+Triggers if any load shedding occurs
+
+---
+
+## Resource Limits
+
+**Location:** `deployments/kubernetes/base/deployment.yaml`
+
+```yaml
+resources:
+  requests:
+    cpu: 100m        # Guaranteed CPU
+    memory: 128Mi    # Guaranteed memory
+  limits:
+    cpu: 500m        # CPU burst limit
+    memory: 256Mi    # OOM kill threshold
+```
+
+**Rationale:**
+- **Requests:** Minimum guaranteed resources for scheduling
+- **Limits:** Prevent resource starvation of other pods
+- **CPU:** 100m sufficient for steady state, 500m for burst traffic
+- **Memory:** 128Mi typical, 256Mi includes cache + connections
+
+**Tuning:**
+- Monitor with `kubectl top pods`
+- Increase if CPU throttling or OOM kills occur
+- Consider HPA if load patterns are predictable
+
+---
+
+## Health Checks
+
+### Liveness Probe
+
+**Endpoint:** `GET /health`
+**Purpose:** Determine if pod should be restarted
+
+```yaml
+livenessProbe:
+  httpGet:
+    path: /health
+    port: 8080
+  initialDelaySeconds: 10
+  periodSeconds: 10
+```
+
+**Behavior:**
+- Returns 200 if service is alive
+- Does NOT check upstream connectivity (important!)
+- K8s restarts pod if health check fails
+
+**Why Not Check Upstream:**
+- Upstream outage should not kill all pods
+- Pods can serve stale cache during outages
+- Conflating liveness + readiness causes cascading failures
+
+### Readiness Probe
+
+**Status:** Currently same as liveness (suboptimal)
+
+**Recommended Production Enhancement:**
+- Create separate `/ready` endpoint
+- Check upstream API connectivity
+- Remove from load balancer if upstream unreachable
+- Keep pod alive to serve stale cache
+
+---
+
+## Configuration Reference
+
+### Required
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `WEATHER_API_KEY` | OpenWeatherMap API key | `abc123...` |
+
+### API Version
+
+| Variable | Description | Default | Values |
+|----------|-------------|---------|--------|
+| `WEATHER_API_VERSION` | OpenWeather API version | `2.5` | `2.5`, `3.0` |
+
+### Timeouts
+
+| Variable | Description | Default | Range |
+|----------|-------------|---------|-------|
+| `REQUEST_TIMEOUT_SECONDS` | Total request timeout | 10s | 1-60s |
+| `UPSTREAM_TIMEOUT_SECONDS` | Upstream API timeout | 5s | 1-30s |
+| `CACHE_TTL_SECONDS` | Cache freshness window | 300s | 60-3600s |
+
+**Timeout Relationship:** `UPSTREAM_TIMEOUT < REQUEST_TIMEOUT` (validated at startup)
+
+### Rate Limiting & Load Shedding
+
+| Variable | Description | Default | Range |
+|----------|-------------|---------|-------|
+| `RATE_LIMIT_RPS` | Requests per second per IP | 50 | 1-1000 |
+| `LOAD_SHED_THRESHOLD` | Max concurrent requests | 100 | 10-10000 |
+
+### Observability
+
+| Variable | Description | Default | Values |
+|----------|-------------|---------|--------|
+| `LOG_LEVEL` | Logging verbosity | `info` | `debug`, `info`, `warn`, `error` |
+| `PORT` | HTTP server port | 8080 | 1-65535 |
+
+---
+
+## Common Operational Patterns
+
+### Handling Upstream Outages
+
+**What Happens:**
+1. Request comes in → cache miss
+2. Upstream API call fails (network error or 5xx)
+3. Retry 3 times with exponential backoff + jitter
+4. All retries fail → check for stale cache
+5. If stale cache exists and < 10 min old → serve stale
+6. Otherwise → return 503 to client
+
+**Metrics to Watch:**
+- `stale_cache_used_total` - Increases during outage
+- `external_api_failures_total{api="openweathermap"}` - Upstream failures
+- `http_requests_total{status="503"}` - Failed requests (no stale cache available)
+
+**Logs:**
+```
+correlation_id=abc123 msg="upstream API error" status_code=503
+correlation_id=abc123 msg="serving stale cache data" age="8m30s"
+```
+
+### Handling Traffic Spikes
+
+**What Happens:**
+1. Traffic exceeds normal levels
+2. Inflight requests reach `LOAD_SHED_THRESHOLD` (100)
+3. Additional requests rejected with 503
+4. `load_shed_total` metric increments
+
+**Response:**
+- Short-term: Increase `LOAD_SHED_THRESHOLD`
+- Medium-term: Scale horizontally (add pods)
+- Long-term: Implement HPA based on `http_inflight_requests`
+
+### Debugging Slow Requests
+
+**Metrics:**
+```bash
+# Check P95 latency
+curl http://localhost:8080/metrics | grep http_request_duration_seconds
+
+# Check cache hit rate
+curl http://localhost:8080/metrics | grep cache_hits_total
+curl http://localhost:8080/metrics | grep cache_misses_total
+```
+
+**Logs:**
+```bash
+# Follow logs for a specific correlation ID
+kubectl logs -l app=weather-service | grep correlation_id=abc123
+```
+
+**Common Causes:**
+- Cache misses forcing upstream calls (increase `CACHE_TTL_SECONDS`)
+- Upstream API slow (check `external_api_requests_total` duration)
+- Rate limiting / retry backoff (check for 429 responses)
+
+---
+
+## Not Implemented (Future Enhancements)
+
+The following were considered but not implemented to avoid complexity:
+
+1. **Circuit Breaker** - Would stop calling upstream after X consecutive failures
+2. **Readiness Probe with Dependency Check** - Separate from liveness
+3. **Request Context Deadline Propagation** - Carry parent timeouts through call chain
+4. **Adaptive Retry Backoff** - Adjust based on upstream response patterns
+5. **Redis Cache** - For horizontal scaling and cache persistence
+6. **OpenTelemetry Tracing** - Distributed request tracing
+
+---
+
+## Testing
+
+**Location:** `*_test.go` files
+
+**Key Test Files:**
+- `internal/weather/errors_test.go` - Error type classification
+- `internal/config/config_test.go` - Configuration validation
+- `internal/cache/cache_test.go` - Cache operations including stale-on-error
+- `internal/weather/client_test.go` - Client logic with mocked HTTP responses
+
+**Run Tests:**
+```bash
+go test ./...
+go test -v -race ./...  # With race detector
+go test -coverprofile=coverage.out ./...  # With coverage
+```
+
+---
+
+## Summary
+
+The weather-service implements production-grade hardening through:
+
+✅ **Type-safe error handling** with structured errors and explicit retry policies
+✅ **Fail-fast configuration validation** at startup
+✅ **Optimized HTTP client** with connection pooling
+✅ **Proper retry jitter** to prevent thundering herd
+✅ **Stale-on-error resilience** for upstream outages
+✅ **Load shedding** for overload protection
+✅ **Comprehensive observability** with metrics, logs, and correlation IDs
+✅ **Security hardening** with distroless containers and minimal privileges
+
+All patterns are implemented without external dependencies, keeping operational complexity minimal while achieving production reliability.
