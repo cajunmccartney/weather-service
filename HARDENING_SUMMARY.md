@@ -537,7 +537,7 @@ kubectl logs -l app=weather-service | grep correlation_id=abc123
 
 ## Not Implemented (Future Enhancements)
 
-The following were considered but not implemented to avoid complexity:
+The following were considered but not implemented to avoid complexity or it was determined to be unnecessary for a local deployment:
 
 1. **Circuit Breaker** - Would stop calling upstream after X consecutive failures
 2. **Readiness Probe with Dependency Check** - Separate from liveness
@@ -545,6 +545,8 @@ The following were considered but not implemented to avoid complexity:
 4. **Adaptive Retry Backoff** - Adjust based on upstream response patterns
 5. **Redis Cache** - For horizontal scaling and cache persistence
 6. **OpenTelemetry Tracing** - Distributed request tracing
+
+In a live production environment, these would added to the implementation.
 
 ---
 
